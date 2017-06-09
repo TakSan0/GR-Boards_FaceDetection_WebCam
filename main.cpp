@@ -1,5 +1,4 @@
 #include "mbed.h"
-#include "SdUsbConnect.h"
 #include "opencv.hpp"
 #include "camera_if.hpp"
 #include "face_detector.hpp"
@@ -46,6 +45,12 @@
   #error NETWORK_TYPE error
 #endif /* NETWORK_TYPE */
 
+#if (NETWORK_TYPE == 1)
+#include "SDBlockDevice_GRBoard.h"
+#else
+#include "SdUsbConnect.h"
+#endif
+
 using namespace cv;
 
 /* Application variables */
@@ -69,13 +74,22 @@ rtos::Mutex mtx_data;
 
 static char detect_str[32];
 static char detect_str_send[32];
+static char quality_str[3];
 Timer  detect_timer;
 
-static int snapshot_req(const char* rootPath, const char ** pp_data) {
+static int snapshot_req(const char* rootPath, const char* path, const char ** pp_data) {
     if (strcmp(rootPath, "/camera") == 0) {
         int jpeg_size = (int)create_jpeg();
         *pp_data = (const char *)get_jpeg_adr();
+        return jpeg_size;
+    } else if (strcmp(rootPath, "/quality") == 0) {
+        int quality_resq = SetJpegQuality(atoi(path+1));
 
+        quality_str[0] = (quality_resq / 10) + 0x30;
+        quality_str[1] = (quality_resq % 10) + 0x30;
+        *pp_data = (const char *)quality_str;
+        return 2;
+    } else {
         mtx_data.lock();
         if (detect_timer.read_ms() < 1000) {
             memcpy(detect_str_send, detect_str, sizeof(detect_str_send));
@@ -83,9 +97,6 @@ static int snapshot_req(const char* rootPath, const char ** pp_data) {
             sprintf(detect_str_send, "0,0,0,0");
         }
         mtx_data.unlock();
-
-        return jpeg_size;
-    } else {
         *pp_data = (const char *)detect_str_send;
         return strlen(detect_str_send);
     }
@@ -106,6 +117,15 @@ static void mount_romramfs(void) {
 
 void http_task(void) {
     mount_romramfs();
+
+#if defined(TARGET_RZ_A1H) && (NETWORK_TYPE == 1)
+    //Audio Camera Shield USB1 enable for WlanBP3595
+    DigitalOut usb1en(P3_8);
+    usb1en = 1;        //Outputs high level
+    Thread::wait(5);
+    usb1en = 0;        //Outputs low level
+    Thread::wait(5);
+#endif
 
 #if (USE_DHCP == 0)
     network.set_dhcp(false);
@@ -131,6 +151,7 @@ void http_task(void) {
 
     SnapshotHandler::attach_req(&snapshot_req);
     HTTPServerAddHandler<SnapshotHandler>("/camera");
+    HTTPServerAddHandler<SnapshotHandler>("/quality");
     HTTPServerAddHandler<SnapshotHandler>("/pos");
     FSHandler::mount("/storage", "/");
     HTTPServerAddHandler<FSHandler>("/");
@@ -149,11 +170,23 @@ int main() {
     camera_start();
     led4 = 1;
 
-    // SD & USB
-    SdUsbConnect storage("storage");
+    // SD
     printf("Finding a storage...");
     // wait for the storage device to be connected
+#if (NETWORK_TYPE == 1)
+    FATFileSystem fs("storage");
+    SDBlockDevice_GRBoard sd;
+    while (1) {
+        if (sd.connect()) {
+            fs.mount(&sd);
+            break;
+        }
+        Thread::wait(250);
+    }
+#else
+    SdUsbConnect storage("storage");
     storage.wait_connect();
+#endif
     printf("done\n");
     led3 = 1;
 
@@ -186,6 +219,10 @@ int main() {
         if (face_roi.width > 0 && face_roi.height > 0) {   // A face is detected
             led1 = 1;
             printf("Detected a face X:%d Y:%d W:%d H:%d\n",face_roi.x, face_roi.y, face_roi.width, face_roi.height);
+#if MBED_CONF_APP_LCD
+            ClearSquare();
+            DrawSquare(face_roi.x, face_roi.y, face_roi.width, face_roi.height, 0x0000f0f0);
+#endif
             mtx_data.lock();
             sprintf(detect_str, "%d,%d,%d,%d", face_roi.x, face_roi.y, face_roi.width, face_roi.height);
             detect_timer.reset();
@@ -196,6 +233,11 @@ int main() {
             imwrite(file_name, frame_gray);
 #endif
         } else {
+#if MBED_CONF_APP_LCD
+            if (detect_timer.read_ms() >= 1000) {
+                ClearSquare();
+            }
+#endif
             led1 = 0;
         }
 

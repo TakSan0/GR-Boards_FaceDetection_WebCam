@@ -78,4 +78,10 @@ uint8_t* get_jpeg_adr();
 */
 void create_gray(cv::Mat &img_gray);
 
+#if MBED_CONF_APP_LCD
+void ClearSquare(void);
+void DrawSquare(int x, int y, int w, int h, uint32_t const colour);
+#endif
+int SetJpegQuality(int quality);
+
 #endif
