@@ -34,6 +34,7 @@
 #include "mbed.h"
 #include "DisplayBace.h"
 #include "opencv.hpp"
+#include "EasyAttach_CameraAndLCD.h"
 
 /* Video input and LCD layer 0 output */
 #define VIDEO_FORMAT           (DisplayBase::VIDEO_FORMAT_YCBCR422)
@@ -43,8 +44,16 @@
 
 /*! Frame buffer stride: Frame buffer stride should be set to a multiple of 32 or 128
     in accordance with the frame buffer burst transfer mode. */
-#define VIDEO_PIXEL_HW         (320u)  /* VGA */
-#define VIDEO_PIXEL_VW         (240u)  /* VGA */
+#if MBED_CONF_APP_LCD
+  #define VIDEO_PIXEL_HW       LCD_PIXEL_WIDTH
+  #define VIDEO_PIXEL_VW       LCD_PIXEL_HEIGHT
+  #if (MBED_CONF_APP_LCD_TYPE == GR_PEACH_4_3INCH_SHIELD) || (MBED_CONF_APP_LCD_TYPE == GR_LYCHEE_TF043HV001A0)
+  #define ASPECT_RATIO_16_9    (1)
+  #endif
+#else
+  #define VIDEO_PIXEL_HW       (320u)  /* QVGA */
+  #define VIDEO_PIXEL_VW       (240u)  /* QVGA */
+#endif
 
 #define FRAME_BUFFER_STRIDE    (((VIDEO_PIXEL_HW * DATA_SIZE_PER_PIC) + 31u) & ~31u)
 #define FRAME_BUFFER_HEIGHT    (VIDEO_PIXEL_VW)
@@ -58,20 +67,6 @@
 void camera_start(void);
 
 /**
-* @brief	Create jpeg from yuv image
-* @param	None
-* @return	jpeg size
-*/
-size_t create_jpeg();
-
-/**
-* @brief	Return jpeg addresse
-* @param	None
-* @return	jpeg address
-*/
-uint8_t* get_jpeg_adr();
-
-/**
 * @brief	Takes a video frame (in grayscale)
 * @param	img_gray	Grayscale video frame
 * @return	None
@@ -83,5 +78,8 @@ void ClearSquare(void);
 void DrawSquare(int x, int y, int w, int h, uint32_t const colour);
 #endif
 int SetJpegQuality(int quality);
+void SetVfieldIntSkipCnt(int skip_cnt);
+size_t get_jpeg_buff(int * p_image_idx, uint8_t** pp_buf);
+void free_jpeg_buff(uint8_t* buff);
 
 #endif

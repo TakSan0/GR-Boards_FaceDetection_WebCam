@@ -9,8 +9,7 @@
 #include "RomRamBlockDevice.h"
 #include "file_table.h"
 
-#define DBG_CAPTURE   (0)
-#define DBG_PCMONITOR (0)
+#define DBG_PCMONITOR (1)
 #define FACE_DETECTOR_MODEL     "/storage/lbpcascade_frontalface.xml"
 
 /**** User Selection *********/
@@ -21,12 +20,15 @@
   #define SUBNET_MASK          ("255.255.255.0")   /* Subnet mask     */
   #define DEFAULT_GATEWAY      ("192.168.0.3")     /* Default gateway */
 #endif
-#define NETWORK_TYPE           (3)                 /* Select  0(Ethernet), 1(BP3595), 2(ESP32 STA) ,3(ESP32 AP) */
+#define NETWORK_TYPE           (3)                 /* Select  0(Ethernet), 1(BP3595), 2(ESP32 STA), 3(ESP32 AP) */
 #if (NETWORK_TYPE >= 1)
   #define WLAN_SSID            ("ESP32-lychee")    /* SSID */
   #define WLAN_PSK             ("1234567890")      /* PSK(Pre-Shared Key) */
   #define WLAN_SECURITY        NSAPI_SECURITY_WPA2 /* NSAPI_SECURITY_NONE, NSAPI_SECURITY_WEP, NSAPI_SECURITY_WPA, NSAPI_SECURITY_WPA2 or NSAPI_SECURITY_WPA_WPA2 */
 #endif
+/** JPEG out setting **/
+#define JPEG_ENCODE_QUALITY    (15)                /* JPEG encode quality (min:1, max:75 (Considering the size of JpegBuffer, about 75 is the upper limit.)) */ 
+#define VFIELD_INT_SKIP_CNT    (0)                 /* A guide for GR-LYCHEE.  0:60fps, 1:30fps, 2:20fps, 3:15fps, 4:12fps, 5:10fps */
 /*****************************/
 
 #if (NETWORK_TYPE == 0)
@@ -34,16 +36,21 @@
   EthernetInterface network;
 #elif (NETWORK_TYPE == 1)
   #include "LWIPBP3595Interface.h"
+  #include "LWIPBP3595Interface_BssType.h"
   LWIPBP3595Interface network;
 #elif (NETWORK_TYPE == 2)
   #include "ESP32Interface.h"
-  ESP32Interface network(P5_3, P3_14, P3_15, P0_2);
+  ESP32Interface network(P5_3, P3_14, P3_15, P0_2, false, NC, NC, 230400);
 #elif (NETWORK_TYPE == 3)
   #include "ESP32InterfaceAP.h"
-  ESP32InterfaceAP network(P5_3, P3_14, P3_15, P0_2);
+  ESP32InterfaceAP network(P5_3, P3_14, P3_15, P0_2, false, NC, NC, 230400);
 #else
   #error NETWORK_TYPE error
 #endif /* NETWORK_TYPE */
+
+#if (USE_DHCP == 0) && ((NETWORK_TYPE == 0) || ((NETWORK_TYPE == 1) && (BSS_TYPE == 0x02)))
+#include "DhcpServer.h"
+#endif
 
 #if (NETWORK_TYPE == 1)
 #include "SDBlockDevice_GRBoard.h"
@@ -54,51 +61,56 @@
 using namespace cv;
 
 /* Application variables */
-Mat frame_gray;     // Input frame (in grayscale)
+static Mat frame_gray;     // Input frame (in grayscale)
 
-#if (DBG_PCMONITOR == 1)
-/* For viewing image on PC */
-static DisplayApp  display_app;
-#endif
+static DigitalOut led1(LED1);
+static DigitalOut led2(LED2);
+static DigitalOut led3(LED3);
+static DigitalOut led4(LED4);
 
-DigitalOut led1(LED1);
-DigitalOut led2(LED2);
-DigitalOut led3(LED3);
-DigitalOut led4(LED4);
+static Thread httpTask(osPriorityAboveNormal, (1024 * 4));
+static Thread displayTask(osPriorityAboveNormal, (1024 * 8));
 
-Thread httpTask(osPriorityNormal, (1024 * 4));
-
-FATFileSystem fs("storage");
-RomRamBlockDevice romram_bd(512000, 512);
-rtos::Mutex mtx_data;
+static FATFileSystem fs("storage");
+static RomRamBlockDevice romram_bd(512000, 512);
+static rtos::Mutex mtx_data;
 
 static char detect_str[32];
 static char detect_str_send[32];
 static char quality_str[3];
-Timer  detect_timer;
+static int image_idx_snapshot = 0;
 
 static int snapshot_req(const char* rootPath, const char* path, const char ** pp_data) {
     if (strcmp(rootPath, "/camera") == 0) {
-        int jpeg_size = (int)create_jpeg();
-        *pp_data = (const char *)get_jpeg_adr();
+        uint8_t * jpeg_addr;
+        int jpeg_size = (int)get_jpeg_buff(&image_idx_snapshot, &jpeg_addr);
+        *pp_data = (const char *)jpeg_addr;
         return jpeg_size;
     } else if (strcmp(rootPath, "/quality") == 0) {
         int quality_resq = SetJpegQuality(atoi(path+1));
+        int idx = 0;
 
-        quality_str[0] = (quality_resq / 10) + 0x30;
-        quality_str[1] = (quality_resq % 10) + 0x30;
+        if (quality_resq >= 100) {
+            quality_str[idx++] = ((quality_resq / 100) % 10) + 0x30;
+        }
+        if (quality_resq >= 10) {
+            quality_str[idx++] = ((quality_resq /  10) % 10) + 0x30;
+        }
+        quality_str[idx++] = (quality_resq % 10) + 0x30;
         *pp_data = (const char *)quality_str;
-        return 2;
+        return idx;
     } else {
         mtx_data.lock();
-        if (detect_timer.read_ms() < 1000) {
-            memcpy(detect_str_send, detect_str, sizeof(detect_str_send));
-        } else {
-            sprintf(detect_str_send, "0,0,0,0");
-        }
+        memcpy(detect_str_send, detect_str, sizeof(detect_str_send));
         mtx_data.unlock();
         *pp_data = (const char *)detect_str_send;
         return strlen(detect_str_send);
+    }
+}
+
+static void send_end(const char* rootPath, const char* path, const char * p_data) {
+    if (strcmp(rootPath, "/camera") == 0) {
+        free_jpeg_buff((uint8_t *)p_data);
     }
 }
 
@@ -149,7 +161,12 @@ void http_task(void) {
     printf("Gateway Address is %s\r\n", network.get_gateway());
     printf("Network Setup OK\r\n");
 
+#if (USE_DHCP == 0) && ((NETWORK_TYPE == 0) || ((NETWORK_TYPE == 1) && (BSS_TYPE == 0x02)))
+    DhcpServer dhcp_server(&network, "HostName");
+#endif
+
     SnapshotHandler::attach_req(&snapshot_req);
+    SnapshotHandler::attach_req_send_end(&send_end);
     HTTPServerAddHandler<SnapshotHandler>("/camera");
     HTTPServerAddHandler<SnapshotHandler>("/quality");
     HTTPServerAddHandler<SnapshotHandler>("/pos");
@@ -158,13 +175,32 @@ void http_task(void) {
     HTTPServerStart(&network, 80);
 }
 
-int main() {
-#if (DBG_CAPTURE == 1)
-    char file_name[32];
-    int file_name_index_detected = 1;
+#if (DBG_PCMONITOR == 1)
+static void display_task(void) {
+    DisplayApp display_app;
+    int image_idx_display = 0;
+    uint8_t * jpeg_addr;
+    size_t jpeg_size;
+
+    while (1) {
+        jpeg_size = get_jpeg_buff(&image_idx_display, &jpeg_addr);
+        display_app.SendJpeg(jpeg_addr, jpeg_size);
+        free_jpeg_buff(jpeg_addr);
+    }
+}
 #endif
 
+int main() {
     printf("GR-Boards_FaceDetection_WebCam\r\n");
+
+    // Setting of JPEG quality and JPEG frame rate.
+    SetJpegQuality(JPEG_ENCODE_QUALITY);
+#if (MBED_CONF_APP_CAMERA_TYPE == CAMERA_CVBS)
+    // In the case of interlacing, one screen is set by two updates.
+    SetVfieldIntSkipCnt((VFIELD_INT_SKIP_CNT * 2) + 1);
+#else
+    SetVfieldIntSkipCnt(VFIELD_INT_SKIP_CNT);
+#endif
 
     // Camera
     camera_start();
@@ -174,6 +210,7 @@ int main() {
     printf("Finding a storage...");
     // wait for the storage device to be connected
 #if (NETWORK_TYPE == 1)
+    // Since BP3595 is connected to USB1, the file system can not use USB.
     FATFileSystem fs("storage");
     SDBlockDevice_GRBoard sd;
     while (1) {
@@ -196,12 +233,16 @@ int main() {
     printf("done\n");
     led2 = 1;
 
+    Timer detect_timer;
     mtx_data.lock();
     sprintf(detect_str, "0,0,0,0");
+    mtx_data.unlock();
     detect_timer.reset();
     detect_timer.start();
-    mtx_data.unlock();
 
+#if (DBG_PCMONITOR == 1)
+    displayTask.start(&display_task);
+#endif
     httpTask.start(&http_task);
 
     while (1) {
@@ -225,26 +266,18 @@ int main() {
 #endif
             mtx_data.lock();
             sprintf(detect_str, "%d,%d,%d,%d", face_roi.x, face_roi.y, face_roi.width, face_roi.height);
-            detect_timer.reset();
             mtx_data.unlock();
-
-#if (DBG_CAPTURE == 1)
-            sprintf(file_name, "/storage/detected_%d.bmp", file_name_index_detected++);
-            imwrite(file_name, frame_gray);
-#endif
+            detect_timer.reset();
         } else {
-#if MBED_CONF_APP_LCD
             if (detect_timer.read_ms() >= 1000) {
+#if MBED_CONF_APP_LCD
                 ClearSquare();
-            }
 #endif
+                mtx_data.lock();
+                sprintf(detect_str, "0,0,0,0");
+                mtx_data.unlock();
+            }
             led1 = 0;
         }
-
-#if (DBG_PCMONITOR == 1)
-        size_t jpeg_size = create_jpeg();
-        display_app.SendJpeg(get_jpeg_adr(), jpeg_size);
-#endif
-        Thread::wait(5);
     }
 }
