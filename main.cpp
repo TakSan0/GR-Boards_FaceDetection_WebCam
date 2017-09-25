@@ -40,10 +40,10 @@
   LWIPBP3595Interface network;
 #elif (NETWORK_TYPE == 2)
   #include "ESP32Interface.h"
-  ESP32Interface network(P5_3, P3_14, P3_15, P0_2, false, NC, NC, 230400);
+  ESP32Interface network(P5_3, P3_14, P7_1, P0_1, false, NC, NC, 230400);
 #elif (NETWORK_TYPE == 3)
   #include "ESP32InterfaceAP.h"
-  ESP32InterfaceAP network(P5_3, P3_14, P3_15, P0_2, false, NC, NC, 230400);
+  ESP32InterfaceAP network(P5_3, P3_14, P7_1, P0_1, false, NC, NC, 230400);
 #else
   #error NETWORK_TYPE error
 #endif /* NETWORK_TYPE */
