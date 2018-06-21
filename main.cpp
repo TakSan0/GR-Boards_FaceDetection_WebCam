@@ -35,9 +35,7 @@
   #include "EthernetInterface.h"
   EthernetInterface network;
 #elif (NETWORK_TYPE == 1)
-  #include "LWIPBP3595Interface.h"
-  #include "LWIPBP3595Interface_BssType.h"
-  LWIPBP3595Interface network;
+  #error "Not supported"
 #elif (NETWORK_TYPE == 2)
   #include "ESP32Interface.h"
   #if defined(TARGET_RZ_A1H)
@@ -76,6 +74,7 @@ static DigitalOut led2(LED2);
 static DigitalOut led3(LED3);
 static DigitalOut led4(LED4);
 
+static Thread mainTask(osPriorityNormal, (1024 * 33));
 static Thread httpTask(osPriorityAboveNormal, (1024 * 4));
 static Thread displayTask(osPriorityAboveNormal, (1024 * 8));
 
@@ -198,7 +197,7 @@ static void display_task(void) {
 }
 #endif
 
-int main() {
+static void main_task(void) {
     printf("GR-Boards_FaceDetection_WebCam\r\n");
 
     // Setting of JPEG quality and JPEG frame rate.
@@ -288,4 +287,9 @@ int main() {
             led1 = 0;
         }
     }
+}
+
+int main(void) {
+    mainTask.start(callback(main_task));
+    mainTask.join();
 }
